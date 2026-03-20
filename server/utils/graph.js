@@ -1,46 +1,39 @@
 /**
- * Antigravity — Financial Forensics Graph Engine
- * RIFT 2026 Hackathon • Graph Theory Track
+ * Antigravity — Financial Forensics Graph Engine (DSA Edition)
+ * Course Project: Data Structures & Algorithms
+ * 
+ * CORE DATA STRUCTURES:
+ *   1. Forward Adjacency List (Map): O(1) out-neighbor lookup.
+ *   2. Reverse Adjacency List (Map): O(1) in-neighbor lookup.
+ *   3. Metadata Map: Stores scores, patterns, and node degrees.
  *
- * Data Structures:
- *   - Forward Adjacency List  (sender → [receivers])    — O(1) out-neighbor lookup
- *   - Reverse Adjacency List  (receiver → [senders])    — O(1) in-neighbor lookup
- *   - HashMap for node metadata                         — O(1) score/pattern access
- *
- * Algorithms:
- *   1. Cycle Detection   — DFS with recursion stack, lengths 3-5, O(V·(V+E))
- *   2. Smurfing          — Temporal sliding window (72 h), O(E·log E)
- *   3. Layered Chains    — BFS path traversal, degree-filtered, O(V·(V+E))
- *   4. False-Positive    — Merchant / payroll heuristic filter, O(V)
+ * ADVANCED DSA ALGORITHMS:
+ *   1. Tarjan's Algorithm (SCC): Finds all circular fund cycles in O(V + E).
+ *   2. Union-Find (DSU): Identifies disconnected fraud clusters in O(E α(V)).
+ *   3. Kruskal's Algorithm (MST): Finds the "Transaction Backbone" in O(E log E).
+ *   4. BFS Chain Traversal: Identifies layered shell networks in O(V · (V + E)).
+ *   5. Sliding Window: Detects temporal smurfing patterns in O(E log E).
  */
 
 class FraudGraph {
   constructor() {
-    // --- Core data structures ---------------------------------------------------
-    this.adjList     = new Map();   // sender   → [ { receiver, amount, timestamp, tx_id } ]
-    this.reverseAdj  = new Map();   // receiver → [ { sender,   amount, timestamp, tx_id } ]
-    this.nodeMap     = new Map();   // account  → { id, score, patterns: Set, ring_ids: Set,
-                                    //              inDegree, outDegree, txCount, txTimestamps[] }
-    this.edges       = [];          // raw edge list for serialisation
+    this.adjList = new Map();     // sender   → [ { target, amount, ts, tx_id } ]
+    this.reverseAdj = new Map();  // receiver → [ { source, amount, ts, tx_id } ]
+    this.nodeMap = new Map();     // account  → { id, score, patterns: Set, ring_ids: Set, ... }
+    this.edges = [];              // raw edge list
     this.ringCounter = 0;
   }
 
-  // ---------------------------------------------------------------------------
-  // Graph construction — O(1) per transaction
-  // ---------------------------------------------------------------------------
   addTransaction(tx) {
     const { transaction_id, sender_id, receiver_id, amount, timestamp } = tx;
     const ts = new Date(timestamp).getTime();
 
-    // Forward edge
     if (!this.adjList.has(sender_id)) this.adjList.set(sender_id, []);
     this.adjList.get(sender_id).push({ target: receiver_id, amount, ts, transaction_id });
 
-    // Reverse edge
     if (!this.reverseAdj.has(receiver_id)) this.reverseAdj.set(receiver_id, []);
     this.reverseAdj.get(receiver_id).push({ source: sender_id, amount, ts, transaction_id });
 
-    // Node metadata
     for (const id of [sender_id, receiver_id]) {
       if (!this.nodeMap.has(id)) {
         this.nodeMap.set(id, {
@@ -58,75 +51,182 @@ class FraudGraph {
   }
 
   // ---------------------------------------------------------------------------
-  // 1. CYCLE DETECTION — DFS with recursion stack
-  //    Time:  O(V · (V + E))   Space: O(V + E)
+  // 1. TARJAN'S ALGORITHM (Strongly Connected Components)
+  //    Time: O(V + E) | Space: O(V)
   // ---------------------------------------------------------------------------
-  detectCycles(minLen = 3, maxLen = 5) {
-    const rings = [];
-    const seenCanonical = new Set();
+  detectSCCs() {
+    const ids = new Map(); // node -> discovery time
+    const low = new Map(); // node -> low-link value
+    const onStack = new Set();
+    const stack = [];
+    const sccs = [];
+    let time = 0;
 
-    for (const startNode of this.nodeMap.keys()) {
-      // DFS from startNode looking for cycles back to startNode
-      const stack = [{ node: startNode, path: [startNode], depth: 1 }];
+    const findSccs = (at) => {
+      ids.set(at, time);
+      low.set(at, time);
+      time++;
+      stack.push(at);
+      onStack.add(at);
 
-      while (stack.length > 0) {
-        const { node, path, depth } = stack.pop();
-        const neighbors = this.adjList.get(node) || [];
+      const neighbors = this.adjList.get(at) || [];
+      for (const edge of neighbors) {
+        const to = edge.target;
+        if (!ids.has(to)) {
+          findSccs(to);
+          low.set(at, Math.min(low.get(at), low.get(to)));
+        } else if (onStack.has(to)) {
+          low.set(at, Math.min(low.get(at), ids.get(to)));
+        }
+      }
 
-        for (const edge of neighbors) {
-          const next = edge.target;
-
-          if (next === startNode && depth >= minLen) {
-            // Found a cycle — canonicalise to deduplicate
-            const canonical = this._canonicaliseCycle(path);
-            if (!seenCanonical.has(canonical)) {
-              seenCanonical.add(canonical);
-              const ringId = this._nextRingId();
-              rings.push({
-                ring_id: ringId,
-                member_accounts: [...path],
-                pattern_type: 'cycle',
-                cycle_length: path.length
-              });
-              // Tag nodes
-              for (const m of path) {
-                const nd = this.nodeMap.get(m);
-                nd.patterns.add(`cycle_length_${path.length}`);
-                nd.ring_ids.add(ringId);
-                nd.score += 40;
-              }
-            }
-          } else if (depth < maxLen && !path.includes(next)) {
-            stack.push({ node: next, path: [...path, next], depth: depth + 1 });
+      if (ids.get(at) === low.get(at)) {
+        const scc = [];
+        while (stack.length > 0) {
+          const node = stack.pop();
+          onStack.delete(node);
+          low.set(node, ids.get(at));
+          scc.push(node);
+          if (node === at) break;
+        }
+        if (scc.length > 1) {
+          const ringId = this._nextRingId();
+          sccs.push({
+            ring_id: ringId,
+            member_accounts: scc,
+            pattern_type: 'scc_cycle',
+            size: scc.length
+          });
+          for (const nodeId of scc) {
+            const nd = this.nodeMap.get(nodeId);
+            nd.patterns.add('circular_flow_scc');
+            nd.ring_ids.add(ringId);
+            nd.score += 50;
           }
         }
       }
+    };
+
+    for (const node of this.nodeMap.keys()) {
+      if (!ids.has(node)) findSccs(node);
     }
-    return rings;
-  }
-
-  /** Canonical form: rotate so smallest element is first, then join */
-  _canonicaliseCycle(path) {
-    const minIdx = path.indexOf(path.slice().sort()[0]);
-    const rotated = [...path.slice(minIdx), ...path.slice(0, minIdx)];
-    return rotated.join('→');
+    return sccs;
   }
 
   // ---------------------------------------------------------------------------
-  // 2. SMURFING — Fan-in / Fan-out with 72-hour sliding window
-  //    Time:  O(E·log E)  (dominated by timestamp sort)
-  //    Space: O(E)
+  // 2. UNION-FIND (Disjoint Set Union)
+  //    Time: O(E α(V)) | Space: O(V)
   // ---------------------------------------------------------------------------
+  detectClusters() {
+    const parent = new Map();
+    const rank = new Map();
+
+    const find = (i) => {
+      if (parent.get(i) === i) return i;
+      const root = find(parent.get(i));
+      parent.set(i, root); // Path compression
+      return root;
+    };
+
+    const union = (i, j) => {
+      const rootI = find(i);
+      const rootJ = find(j);
+      if (rootI !== rootJ) {
+        if (rank.get(rootI) < rank.get(rootJ)) {
+          parent.set(rootI, rootJ);
+        } else if (rank.get(rootI) > rank.get(rootJ)) {
+          parent.set(rootJ, rootI);
+        } else {
+          parent.set(rootI, rootJ);
+          rank.set(rootJ, rank.get(rootJ) + 1);
+        }
+        return true;
+      }
+      return false;
+    };
+
+    // Initialize
+    for (const node of this.nodeMap.keys()) {
+      parent.set(node, node);
+      rank.set(node, 0);
+    }
+
+    // Only cluster suspicious transactions or nodes with patterns
+    for (const edge of this.edges) {
+      const sn = this.nodeMap.get(edge.sender_id);
+      const rn = this.nodeMap.get(edge.receiver_id);
+      if (sn.score > 0 || rn.score > 0) {
+        union(edge.sender_id, edge.receiver_id);
+      }
+    }
+
+    const clusters = new Map();
+    for (const node of this.nodeMap.keys()) {
+      const root = find(node);
+      const nd = this.nodeMap.get(node);
+      if (nd.score > 0) {
+        if (!clusters.has(root)) clusters.set(root, []);
+        clusters.get(root).push(node);
+      }
+    }
+
+    return Array.from(clusters.values()).filter(c => c.length > 1).map((members, idx) => ({
+      cluster_id: `CLUSTER_${String(idx + 1).padStart(3, '0')}`,
+      members,
+      size: members.length
+    }));
+  }
+
+  // ---------------------------------------------------------------------------
+  // 3. KRUSKAL'S ALGORITHM (Maximum Spanning Forest)
+  //    Time: O(E log E) | Space: O(V + E)
+  // ---------------------------------------------------------------------------
+  computeMST() {
+    // We compute a MAXIMUM Spanning Forest to show the most significant backbone
+    const sortedEdges = [...this.edges].sort((a, b) => b.amount - a.amount);
+    
+    const parent = new Map();
+    const find = (i) => {
+      if (parent.get(i) === i) return i;
+      const root = find(parent.get(i));
+      parent.set(i, root);
+      return root;
+    };
+
+    const union = (i, j) => {
+      const rootI = find(i);
+      const rootJ = find(j);
+      if (rootI !== rootJ) {
+        parent.set(rootI, rootJ);
+        return true;
+      }
+      return false;
+    };
+
+    for (const node of this.nodeMap.keys()) parent.set(node, node);
+
+    const mstTxIds = new Set();
+    for (const edge of sortedEdges) {
+      if (union(edge.sender_id, edge.receiver_id)) {
+        mstTxIds.add(edge.transaction_id);
+      }
+    }
+    return mstTxIds;
+  }
+
+  // ---------------------------------------------------------------------------
+  // EXISTING DOMAIN ALGORITHMS (Keep for complete project)
+  // ---------------------------------------------------------------------------
+  
   detectSmurfing() {
     const WINDOW_MS = 72 * 60 * 60 * 1000;
     const THRESHOLD = 10;
     const rings = [];
 
     for (const [nodeId, nodeData] of this.nodeMap) {
-      // Skip nodes already identified as likely merchants (false-positive guard)
       if (this._isMerchantLike(nodeId)) continue;
 
-      // ---- Fan-in: many unique senders → this node within 72 h ----
+      // Fan-in
       const incoming = this.reverseAdj.get(nodeId) || [];
       if (incoming.length >= THRESHOLD) {
         const sorted = [...incoming].sort((a, b) => a.ts - b.ts);
@@ -137,34 +237,23 @@ class FraudGraph {
           const uniqueSenders = new Set(windowTx.map(e => e.source));
           if (uniqueSenders.size >= THRESHOLD) {
             const ringId = this._nextRingId();
-            const members = [nodeId, ...uniqueSenders];
-            rings.push({
-              ring_id: ringId,
-              member_accounts: members,
-              pattern_type: 'smurfing_fan_in'
-            });
+            rings.push({ ring_id: ringId, member_accounts: [nodeId, ...uniqueSenders], pattern_type: 'smurfing_fan_in' });
             nodeData.patterns.add('fan_in');
             nodeData.ring_ids.add(ringId);
             nodeData.score += 30;
             for (const s of uniqueSenders) {
               const sn = this.nodeMap.get(s);
-              if (sn && !this._isMerchantLike(s)) {
-                sn.patterns.add('fan_in_source');
-                sn.ring_ids.add(ringId);
-                sn.score += 15;
-              }
+              if (sn && !this._isMerchantLike(s)) { sn.patterns.add('fan_in_source'); sn.ring_ids.add(ringId); sn.score += 15; }
             }
-            break; // one detection per node
+            break;
           }
         }
       }
 
-      // ---- Fan-out: this node → many unique receivers within 72 h ----
+      // Fan-out
       const outgoing = this.adjList.get(nodeId) || [];
       if (outgoing.length >= THRESHOLD) {
-        // Skip payroll-like accounts before scoring fan-out
         if (this._detectPayrollPattern(nodeId)) continue;
-
         const sorted = [...outgoing].sort((a, b) => a.ts - b.ts);
         let left = 0;
         for (let right = 0; right < sorted.length; right++) {
@@ -173,22 +262,13 @@ class FraudGraph {
           const uniqueReceivers = new Set(windowTx.map(e => e.target));
           if (uniqueReceivers.size >= THRESHOLD) {
             const ringId = this._nextRingId();
-            const members = [nodeId, ...uniqueReceivers];
-            rings.push({
-              ring_id: ringId,
-              member_accounts: members,
-              pattern_type: 'smurfing_fan_out'
-            });
+            rings.push({ ring_id: ringId, member_accounts: [nodeId, ...uniqueReceivers], pattern_type: 'smurfing_fan_out' });
             nodeData.patterns.add('fan_out');
             nodeData.ring_ids.add(ringId);
             nodeData.score += 30;
             for (const r of uniqueReceivers) {
               const rn = this.nodeMap.get(r);
-              if (rn && !this._isMerchantLike(r) && !this._detectPayrollPattern(r)) {
-                rn.patterns.add('fan_out_target');
-                rn.ring_ids.add(ringId);
-                rn.score += 15;
-              }
+              if (rn && !this._isMerchantLike(r) && !this._detectPayrollPattern(r)) { rn.patterns.add('fan_out_target'); rn.ring_ids.add(ringId); rn.score += 15; }
             }
             break;
           }
@@ -198,144 +278,64 @@ class FraudGraph {
     return rings;
   }
 
-  // ---------------------------------------------------------------------------
-  // 3. LAYERED SHELL NETWORK DETECTION — BFS chain traversal
-  //    Time:  O(V · (V + E))   Space: O(V)
-  //    Intermediate nodes: total degree (in + out) ≤ 3
-  // ---------------------------------------------------------------------------
   detectLayeredChains() {
     const rings = [];
     const MAX_CHAIN_DEPTH = 8;
     const seenChains = new Set();
-
     for (const [startNode] of this.nodeMap) {
-      // BFS / iterative DFS for chains
       const queue = [{ node: startNode, path: [startNode] }];
-
       while (queue.length > 0) {
         const { node, path } = queue.shift();
         if (path.length > MAX_CHAIN_DEPTH) continue;
-
         const neighbors = this.adjList.get(node) || [];
         for (const edge of neighbors) {
           const next = edge.target;
           if (path.includes(next)) continue;
-
           const nextData = this.nodeMap.get(next);
           const newPath = [...path, next];
-
-          // Record chains of ≥ 3 hops (4+ nodes) where intermediates have low activity
           if (newPath.length >= 4) {
             const intermediates = newPath.slice(1, -1);
-            const allShell = intermediates.every(m => {
-              const d = this.nodeMap.get(m);
-              return d.txCount <= 3;
-            });
-
-            if (allShell) {
+            if (intermediates.every(m => this.nodeMap.get(m).txCount <= 3)) {
               const key = newPath.join('→');
               if (!seenChains.has(key)) {
                 seenChains.add(key);
                 const ringId = this._nextRingId();
-                rings.push({
-                  ring_id: ringId,
-                  member_accounts: [...newPath],
-                  pattern_type: 'layered_chain'
-                });
-                for (const m of newPath) {
-                  const nd = this.nodeMap.get(m);
-                  nd.patterns.add('layered_chain');
-                  nd.ring_ids.add(ringId);
-                  nd.score += 20;
-                }
+                rings.push({ ring_id: ringId, member_accounts: [...newPath], pattern_type: 'layered_chain' });
+                for (const m of newPath) { const nd = this.nodeMap.get(m); nd.patterns.add('layered_chain'); nd.ring_ids.add(ringId); nd.score += 20; }
               }
             }
           }
-
-          // Only continue BFS through low-degree intermediates
-          if (nextData.txCount <= 3 && newPath.length < MAX_CHAIN_DEPTH) {
-            queue.push({ node: next, path: newPath });
-          }
+          if (nextData.txCount <= 3 && newPath.length < MAX_CHAIN_DEPTH) queue.push({ node: next, path: newPath });
         }
       }
     }
     return rings;
   }
 
-  // ---------------------------------------------------------------------------
-  // 4. FALSE-POSITIVE CONTROL
-  //    Heuristic: a "merchant" has high fan-in AND high fan-out AND regular txns
-  //    Heuristic: a "payroll" account sends same amounts at regular intervals
-  // ---------------------------------------------------------------------------
   _isMerchantLike(nodeId) {
-    const data = this.nodeMap.get(nodeId);
-    if (!data) return false;
-    // High-volume bidirectional traffic → likely a merchant or exchange
-    if (data.inDegree >= 20 && data.outDegree >= 20) return true;
-    // Very high fan-in with very low fan-out → likely a large business receiving payments
-    if (data.inDegree >= 50 && data.outDegree <= 2) return true;
-    return false;
+    const d = this.nodeMap.get(nodeId);
+    return d && ((d.inDegree >= 20 && d.outDegree >= 20) || (d.inDegree >= 50 && d.outDegree <= 2));
   }
 
   _detectPayrollPattern(nodeId) {
-    const outgoing = this.adjList.get(nodeId) || [];
-    if (outgoing.length < 5) return false;
-    // Check if amounts are identical (common in payroll)
-    const amounts = outgoing.map(e => e.amount);
-    const uniqueAmounts = new Set(amounts);
-    if (uniqueAmounts.size <= 2 && outgoing.length >= 10) return true;
-    return false;
+    const o = this.adjList.get(nodeId) || [];
+    if (o.length < 5) return false;
+    const uniqueAmounts = new Set(o.map(e => e.amount));
+    return uniqueAmounts.size <= 2 && o.length >= 10;
   }
 
-  // ---------------------------------------------------------------------------
-  // 5. HIGH VELOCITY DETECTION
-  //    >10 transactions within 24 hours
-  // ---------------------------------------------------------------------------
-  detectHighVelocity() {
-    const WINDOW_24H = 24 * 60 * 60 * 1000;
-
-    for (const [nodeId, data] of this.nodeMap) {
-      if (this._isMerchantLike(nodeId)) continue;
-      if (this._detectPayrollPattern(nodeId)) continue;
-
-      const timestamps = [...data.txTimestamps].sort((a, b) => a - b);
-      let left = 0;
-      for (let right = 0; right < timestamps.length; right++) {
-        while (timestamps[right] - timestamps[left] > WINDOW_24H) left++;
-        if (right - left + 1 > 10) {
-          data.patterns.add('high_velocity');
-          data.score += 10;
-          break;
-        }
-      }
-    }
-  }
-
-  // ---------------------------------------------------------------------------
-  // 6. SCORING — Normalise to 0–100, apply false-positive suppression
-  // ---------------------------------------------------------------------------
   calculateFinalScores() {
-    this.detectHighVelocity();
-
     for (const [nodeId, data] of this.nodeMap) {
-      // Suppress false positives
       if (this._isMerchantLike(nodeId) || this._detectPayrollPattern(nodeId)) {
-        data.score = 0;
-        data.patterns.clear();
-        data.ring_ids.clear();
-        continue;
+        data.score = 0; data.patterns.clear(); data.ring_ids.clear();
       }
-      // Cap at 100
       data.score = Math.min(100, data.score);
     }
   }
 
-  // ---------------------------------------------------------------------------
-  // 7. OUTPUT — Strict JSON matching RIFT spec
-  // ---------------------------------------------------------------------------
-  getResults(processingTimeMs) {
+  getResults(processingTimeMs, extra) {
+    const mstTxIds = extra.mstTxIds || new Set();
     const suspicious_accounts = [];
-
     for (const [id, data] of this.nodeMap) {
       if (data.score > 0) {
         suspicious_accounts.push({
@@ -346,33 +346,26 @@ class FraudGraph {
         });
       }
     }
-
-    // Sort descending by suspicion_score (spec requirement)
     suspicious_accounts.sort((a, b) => b.suspicion_score - a.suspicion_score);
 
     return {
       suspicious_accounts,
+      ...extra,
       graph_data: {
         nodes: Array.from(this.nodeMap.values()).map(n => ({
-          id: n.id,
-          score: n.score,
+          id: n.id, score: n.score,
           ring_id: n.ring_ids.size > 0 ? Array.from(n.ring_ids)[0] : null,
           patterns: Array.from(n.patterns)
         })),
         links: this.edges.map(e => ({
-          source: e.sender_id,
-          target: e.receiver_id,
-          amount: e.amount,
-          timestamp: e.timestamp,
-          transaction_id: e.transaction_id
+          source: e.sender_id, target: e.receiver_id,
+          amount: e.amount, timestamp: e.timestamp, transaction_id: e.transaction_id,
+          isMST: mstTxIds.has(e.transaction_id)
         }))
       }
     };
   }
 
-  // ---------------------------------------------------------------------------
-  // Helpers
-  // ---------------------------------------------------------------------------
   _nextRingId() {
     this.ringCounter++;
     return `RING_${String(this.ringCounter).padStart(3, '0')}`;
