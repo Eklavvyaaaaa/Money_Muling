@@ -11,24 +11,26 @@ function escapeHtml(str) {
     .replace(/'/g, '&#039;');
 }
 
-function GraphView({ data, showMST }) {
+function GraphView({ data, showMST, onNodeClick }) {
   const fgRef = useRef();
 
   const getNodeColor = useCallback((node) => {
-    if (node.ring_id)    return '#f59e0b';
-    if (node.score > 30) return '#ef4444';
-    if (node.score > 0)  return '#f97316';
+    if (node.analyst_status === 'Confirmed Fraud') return '#d946ef'; // Fuchsia
+    if (node.analyst_status === 'Cleared') return '#10b981'; // Green
+    if (node.score > 60) return '#ef4444';
+    if (node.score >= 30) return '#f59e0b';
+    if (node.score > 0) return '#3b82f6';
     return '#6366f1';
   }, []);
 
   const getNodeSize = useCallback((node) => {
     if (node.score >= 60) return 8;
     if (node.score >= 30) return 6;
-    if (node.score > 0)   return 5;
+    if (node.score > 0) return 5;
     return 3.5;
   }, []);
 
-  const paintNode = useCallback((node, ctx) => {
+  const paintNode = useCallback((node, ctx, globalScale) => {
     const size = getNodeSize(node);
     const color = getNodeColor(node);
 
@@ -48,12 +50,13 @@ function GraphView({ data, showMST }) {
     ctx.fill();
     ctx.shadowBlur = 0;
 
-    if (node.score >= 30) {
-      ctx.font = 'bold 3px Inter, sans-serif';
+    if (node.score >= 30 && globalScale > 1.2) {
+      const fontSize = Math.max(2, 6 / globalScale);
+      ctx.font = `bold ${fontSize}px Inter, sans-serif`;
       ctx.fillStyle = '#f1f5f9';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'top';
-      ctx.fillText(node.id, node.x, node.y + size + 2);
+      ctx.fillText(node.id, node.x, node.y + size + (1 / globalScale) + 1);
     }
   }, [getNodeColor, getNodeSize]);
 
@@ -62,10 +65,10 @@ function GraphView({ data, showMST }) {
   // I should probably pass a "isMST" property in links from the backend.
   // For now, I'll filter links if showMST is true based on amount (simulated) 
   // but I'll fix the backend to mark them.
-  
+
   const paintLink = (link, ctx, globalScale) => {
     const isMST = link.isMST; // This will come from backend soon
-    
+
     if (showMST && !link.isMST) {
       return; // Hide non-MST links
     }
@@ -76,7 +79,7 @@ function GraphView({ data, showMST }) {
 
     ctx.strokeStyle = isMST ? 'rgba(129, 140, 248, 0.8)' : 'rgba(100, 116, 139, 0.2)';
     ctx.lineWidth = isMST ? 1.5 / globalScale : 0.6 / globalScale;
-    
+
     ctx.beginPath();
     ctx.moveTo(start.x, start.y);
     ctx.lineTo(end.x, end.y);
@@ -92,8 +95,10 @@ function GraphView({ data, showMST }) {
       : 'None';
 
     return `<div style="background:#1e293b;padding:10px 14px;border-radius:10px;border:1px solid #334155;font-size:12px;font-family:Inter,sans-serif;line-height:1.7;min-width:180px">
-      <div style="font-weight:700;color:#f1f5f9;margin-bottom:4px">${safeId}</div>
-      <div><span style="color:#64748b">Suspicion Score:</span> <span style="color:${node.score > 50 ? '#ef4444' : node.score > 0 ? '#f59e0b' : '#10b981'};font-weight:600">${safeScore}/100</span></div>
+      <div style="font-weight:700;color:#f1f5f9;margin-bottom:4px">${safeId} ${node.analyst_status === 'Confirmed Fraud' ? '🚨' : ''}</div>
+      <div><span style="color:#64748b">Analyst Status:</span> <span style="color:${node.analyst_status === 'Confirmed Fraud' ? '#d946ef' : node.analyst_status === 'Cleared' ? '#10b981' : '#f8fafc'};font-weight:600">${node.analyst_status || 'Unreviewed'}</span></div>
+      <div><span style="color:#64748b">Suspicion Score:</span> <span style="color:${node.score > 60 ? '#ef4444' : node.score >= 30 ? '#f59e0b' : '#3b82f6'};font-weight:600">${safeScore}/100</span></div>
+      ${node.distanceFromRiskSource ? `<div><span style="color:#64748b">Risk Distance:</span> ${node.distanceFromRiskSource} hops</div>` : ''}
       <div><span style="color:#64748b">Ring/SCC:</span> ${safeRing || 'Not in SCC'}</div>
       <div><span style="color:#64748b">Patterns:</span> ${safePatterns}</div>
     </div>`;
@@ -113,6 +118,7 @@ function GraphView({ data, showMST }) {
       onNodeClick={(node) => {
         fgRef.current.centerAt(node.x, node.y, 800);
         fgRef.current.zoom(6, 800);
+        if (onNodeClick) onNodeClick(node.id);
       }}
       cooldownTicks={100}
       warmupTicks={50}

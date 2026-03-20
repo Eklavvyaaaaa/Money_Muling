@@ -13,6 +13,8 @@ app.use(cors());
 app.use(express.json());
 
 let analysisResults = null;
+let currentGraph = null;
+const globalStatuses = new Map(); // Store analyst metadata across graph lifecycle
 
 const REQUIRED_COLUMNS = ['transaction_id', 'sender_id', 'receiver_id', 'amount', 'timestamp'];
 
@@ -41,7 +43,7 @@ app.post('/upload', upload.single('file'), (req, res) => {
       graph.addTransaction({ transaction_id: tx_id, sender_id: sender, receiver_id: receiver, amount, timestamp });
     })
     .on('end', () => {
-      try { fs.unlinkSync(req.file.path); } catch (e) {}
+      try { fs.unlinkSync(req.file.path); } catch (e) { }
       if (parseErrors.length > 0) return res.status(400).json({ error: 'CSV error', details: parseErrors.slice(0, 5) });
       if (rowCount === 0) return res.status(400).json({ error: 'CSV empty.' });
 
@@ -49,8 +51,8 @@ app.post('/upload', upload.single('file'), (req, res) => {
       const sccRings = graph.detectSCCs();
       const smurfRings = graph.detectSmurfing();
       const chainRings = graph.detectLayeredChains();
-      graph.calculateFinalScores();
-      
+      graph.calculateFinalScores(globalStatuses);
+
       const clusters = graph.detectClusters();
       const mstTxIds = graph.computeMST();
 
@@ -74,10 +76,132 @@ app.post('/upload', upload.single('file'), (req, res) => {
           organized_clusters: clusters.length,
           processing_time_seconds: parseFloat((processingTimeMs / 1000).toFixed(1))
         }
-      });
+      }, globalStatuses);
+
+      currentGraph = graph;
 
       res.json(analysisResults);
     });
+});
+
+app.post('/account/:id/status', (req, res) => {
+  const accountId = req.params.id;
+  const { status, notes } = req.body;
+  if (!status) return res.status(400).json({ error: 'Status is required' });
+
+  globalStatuses.set(accountId, { status, notes: notes || '' });
+
+  if (currentGraph && analysisResults) {
+    currentGraph.calculateFinalScores(globalStatuses);
+
+    // Regenerate nodes array inside analysisResults gracefully
+    analysisResults.graph_data.nodes = Array.from(currentGraph.nodeMap.values()).map(n => ({
+      id: n.id, score: n.score,
+      ring_id: n.ring_ids.size > 0 ? Array.from(n.ring_ids)[0] : null,
+      patterns: Array.from(n.patterns),
+      distanceFromRiskSource: n.distanceFromRiskSource,
+      associationRisk: n.associationRisk,
+      explanations: n.explanations,
+      analyst_status: (globalStatuses.get(n.id) || {}).status || 'Unreviewed'
+    }));
+
+    // Regenerate suspicious tagged list
+    const suspicious = [];
+    for (const [vid, data] of currentGraph.nodeMap) {
+      if (data.score > 0 || (globalStatuses.get(vid) && globalStatuses.get(vid).status === 'Confirmed Fraud')) {
+        suspicious.push({
+          account_id: vid,
+          suspicion_score: parseFloat(data.score.toFixed(1)),
+          detected_patterns: Array.from(data.patterns),
+          ring_id: data.ring_ids.size > 0 ? Array.from(data.ring_ids)[0] : null,
+          analyst_status: (globalStatuses.get(vid) || {}).status || 'Unreviewed'
+        });
+      }
+    }
+    suspicious.sort((a, b) => b.suspicion_score - a.suspicion_score);
+    analysisResults.suspicious_accounts = suspicious;
+    analysisResults.summary.suspicious_accounts_flagged = suspicious.length;
+  }
+
+  const updatedGraphData = analysisResults ? analysisResults.graph_data : null;
+  res.json({ success: true, accountId, status, notes, updatedGraphData });
+});
+
+app.get('/account/:id/deepdive', (req, res) => {
+  if (!currentGraph) return res.status(404).json({ error: 'No graph available.' });
+  const id = req.params.id;
+  const node = currentGraph.nodeMap.get(id);
+  if (!node) return res.status(404).json({ error: 'Account not found.' });
+
+  const analystInfo = globalStatuses.get(id) || { status: 'Unreviewed', notes: '' };
+  const incoming = currentGraph.reverseAdj.get(id) || [];
+  const outgoing = currentGraph.adjList.get(id) || [];
+
+  let totalInflow = 0; let totalOutflow = 0;
+  const txHistory = [];
+  const counterparties = new Map();
+  const peakHours = new Array(24).fill(0);
+
+  incoming.forEach(e => {
+    totalInflow += e.amount;
+    txHistory.push({ type: 'IN', counterparty: e.source, amount: e.amount, timestamp: e.ts, transaction_id: e.transaction_id });
+    counterparties.set(e.source, (counterparties.get(e.source) || 0) + 1);
+    peakHours[new Date(e.ts).getHours()]++;
+  });
+
+  outgoing.forEach(e => {
+    totalOutflow += e.amount;
+    txHistory.push({ type: 'OUT', counterparty: e.target, amount: e.amount, timestamp: e.ts, transaction_id: e.transaction_id });
+    counterparties.set(e.target, (counterparties.get(e.target) || 0) + 1);
+    peakHours[new Date(e.ts).getHours()]++;
+  });
+
+  txHistory.sort((a, b) => b.timestamp - a.timestamp);
+  const counterpartyList = Array.from(counterparties.entries())
+    .map(([cid, count]) => ({ id: cid, count })).sort((a, b) => b.count - a.count);
+
+  res.json({
+    account_id: node.id,
+    risk_score: parseFloat(node.score.toFixed(1)),
+    distanceFromRiskSource: node.distanceFromRiskSource,
+    explanations: node.explanations || [],
+    analyst_status: analystInfo.status,
+    notes: analystInfo.notes,
+    stats: {
+      total_inflow: totalInflow,
+      total_outflow: totalOutflow,
+      transaction_count: incoming.length + outgoing.length
+    },
+    peak_hours: peakHours,
+    counterparties: counterpartyList,
+    history: txHistory
+  });
+});
+
+app.get('/timeline', (req, res) => {
+  if (!currentGraph) return res.status(404).json({ error: 'No graph available.' });
+  const timestamps = Array.from(new Set(currentGraph.edges.map(e => new Date(e.timestamp).getTime()))).sort((a, b) => a - b);
+  res.json({ timestamps });
+});
+
+app.get('/replay', (req, res) => {
+  if (!currentGraph) return res.status(404).json({ error: 'No graph available.' });
+  const time = req.query.time;
+  if (!time) return res.status(400).json({ error: 'Time parameter required' });
+  const state = currentGraph.getGraphStateAtTime(time);
+  res.json(state);
+});
+
+app.get('/account/:id/explanation', (req, res) => {
+  if (!currentGraph) return res.status(404).json({ error: 'No graph available.' });
+  const node = currentGraph.nodeMap.get(req.params.id);
+  if (!node) return res.status(404).json({ error: 'Account not found.' });
+  res.json({
+    account_id: node.id,
+    risk_score: parseFloat(node.score.toFixed()),
+    distanceFromRiskSource: node.distanceFromRiskSource,
+    explanations: node.explanations || []
+  });
 });
 
 app.get('/download', (req, res) => {
@@ -88,4 +212,5 @@ app.get('/download', (req, res) => {
 });
 
 const PORT = 5001;
-app.listen(PORT, () => console.log(`🔍 Antigravity DSA Server: http://localhost:${PORT}`));
+app.get('/ping', (req, res) => res.json({ status: 'ok', version: 'v2-deepdive', routes: app._router.stack.filter(r => r.route).map(r => `${Object.keys(r.route.methods)[0].toUpperCase()} ${r.route.path}`) }));
+app.listen(PORT, () => console.log(`🔍 Antigravity DSA Server v2: http://localhost:${PORT}`));
