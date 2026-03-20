@@ -33,7 +33,7 @@ app.post('/upload', upload.single('file'), (req, res) => {
   let parseErrors = [];
 
   fs.createReadStream(req.file.path)
-    .pipe(csv())
+    .pipe(csv({ mapHeaders: ({ header }) => header.trim().toLowerCase() }))
     .on('headers', (headers) => {
       const normalised = headers.map(h => h.trim().toLowerCase());
       const missing = REQUIRED_COLUMNS.filter(c => !normalised.includes(c));
@@ -55,6 +55,13 @@ app.post('/upload', upload.single('file'), (req, res) => {
 
       if (!tx_id || !sender || !receiver || isNaN(amount) || !timestamp) {
         parseErrors.push(`Row ${rowCount}: missing or invalid fields`);
+        return;
+      }
+
+      // Validate timestamp format
+      const parsedDate = new Date(timestamp);
+      if (isNaN(parsedDate.getTime())) {
+        parseErrors.push(`Row ${rowCount}: invalid timestamp "${timestamp}"`);
         return;
       }
 
@@ -103,7 +110,7 @@ app.post('/upload', upload.single('file'), (req, res) => {
           })).toFixed(1)
         ),
         member_count: r.member_accounts.length
-      }));
+      })).filter(r => r.risk_score > 0); // Filter out zero-risk rings
 
       // Sort rings by risk_score descending
       fraud_rings.sort((a, b) => b.risk_score - a.risk_score);
@@ -115,7 +122,7 @@ app.post('/upload', upload.single('file'), (req, res) => {
         summary: {
           total_accounts_analyzed: graph.nodeMap.size,
           suspicious_accounts_flagged: processed.suspicious_accounts.length,
-          fraud_rings_detected: allRings.length,
+          fraud_rings_detected: fraud_rings.length,
           processing_time_seconds: parseFloat((processingTimeMs / 1000).toFixed(1))
         }
       };

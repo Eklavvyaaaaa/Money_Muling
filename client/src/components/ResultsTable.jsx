@@ -1,85 +1,95 @@
-import React from 'react';
+import React, { useState } from 'react';
 
-function ResultsTable({ results }) {
+/**
+ * ResultsTable — Shows suspicious accounts with pagination.
+ * Sorted by suspicion score (descending) as received from the API.
+ */
+const PAGE_SIZE = 15;
+
+function ResultsTable({ accounts }) {
+  const [page, setPage] = useState(0);
+
   const getRiskBadge = (score) => {
     if (score >= 70) return <span className="badge badge-danger">{score.toFixed(1)}</span>;
     if (score >= 40) return <span className="badge badge-warning">{score.toFixed(1)}</span>;
     return <span className="badge badge-success">{score.toFixed(1)}</span>;
   };
 
-  const getPatternBadge = (type) => {
-    const label = type.replace(/_/g, ' ');
-    if (type.includes('cycle'))  return <span className="badge badge-danger">{label}</span>;
-    if (type.includes('smurf')) return <span className="badge badge-warning">{label}</span>;
-    return <span className="badge badge-accent">{label}</span>;
+  const getPatternLabel = (pattern) => {
+    if (pattern.includes('cycle'))     return 'badge-danger';
+    if (pattern.includes('fan'))       return 'badge-warning';
+    if (pattern.includes('chain'))     return 'badge-cyan';
+    if (pattern.includes('velocity'))  return 'badge-accent';
+    return 'badge-accent';
   };
 
+  if (!accounts || accounts.length === 0) {
+    return (
+      <div style={{ padding: '2rem', textAlign: 'center', color: '#64748b' }}>
+        No suspicious accounts detected.
+      </div>
+    );
+  }
+
+  const totalPages = Math.ceil(accounts.length / PAGE_SIZE);
+  const start = page * PAGE_SIZE;
+  const pageAccounts = accounts.slice(start, start + PAGE_SIZE);
+
   return (
-    <>
-      {/* ──── Fraud Rings Table (spec-required columns) ──── */}
-      <div className="section-title">Detected Fraud Rings</div>
+    <div>
+      <div style={{ padding: '0.6rem 1.2rem', fontSize: '0.72rem', color: '#64748b' }}>
+        Showing {start + 1}–{Math.min(start + PAGE_SIZE, accounts.length)} of {accounts.length} accounts
+      </div>
       <table>
         <thead>
           <tr>
-            <th>Ring ID</th>
-            <th>Pattern Type</th>
-            <th>Members</th>
-            <th>Risk</th>
-          </tr>
-        </thead>
-        <tbody>
-          {results.fraud_rings.length === 0 ? (
-            <tr><td colSpan={4} style={{ textAlign: 'center', color: '#64748b' }}>No rings detected</td></tr>
-          ) : (
-            results.fraud_rings.slice(0, 25).map((ring, idx) => (
-              <tr key={idx}>
-                <td style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: '0.75rem' }}>{ring.ring_id}</td>
-                <td>{getPatternBadge(ring.pattern_type)}</td>
-                <td>{ring.member_count}</td>
-                <td>{getRiskBadge(ring.risk_score)}</td>
-              </tr>
-            ))
-          )}
-        </tbody>
-      </table>
-
-      {/* Member accounts expandable row */}
-      {results.fraud_rings.length > 0 && (
-        <div style={{ padding: '0.5rem', fontSize: '0.7rem', color: '#64748b', fontFamily: 'JetBrains Mono, monospace' }}>
-          {results.fraud_rings.slice(0, 5).map((ring, idx) => (
-            <div key={idx} style={{ marginBottom: '0.3rem' }}>
-              <span style={{ color: '#94a3b8' }}>{ring.ring_id}:</span>{' '}
-              {ring.member_accounts.slice(0, 6).join(', ')}{ring.member_accounts.length > 6 ? '…' : ''}
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* ──── Suspicious Accounts ──── */}
-      <div className="section-title" style={{ marginTop: '1rem' }}>Suspicious Accounts</div>
-      <table>
-        <thead>
-          <tr>
-            <th>Account ID</th>
+            <th>Account</th>
             <th>Score</th>
             <th>Patterns</th>
           </tr>
         </thead>
         <tbody>
-          {results.suspicious_accounts.length === 0 ? (
-            <tr><td colSpan={3} style={{ textAlign: 'center', color: '#64748b' }}>No suspicious accounts</td></tr>
-          ) : (
-            results.suspicious_accounts.slice(0, 20).map((acc, idx) => (
-              <tr key={idx}>
-                <td style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: '0.75rem' }}>{acc.account_id}</td>
-                <td>{getRiskBadge(acc.suspicion_score)}</td>
-                <td className="members-cell">{acc.detected_patterns.join(', ')}</td>
-              </tr>
-            ))
-          )}
+          {pageAccounts.map((acc, idx) => (
+            <tr key={start + idx}>
+              <td className="mono">{acc.account_id}</td>
+              <td>{getRiskBadge(acc.suspicion_score)}</td>
+              <td>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '3px' }}>
+                  {acc.detected_patterns.map((p, i) => (
+                    <span key={i} className={`badge ${getPatternLabel(p)}`}>
+                      {p.replace(/_/g, ' ')}
+                    </span>
+                  ))}
+                </div>
+              </td>
+            </tr>
+          ))}
         </tbody>
       </table>
-    </>
+      {totalPages > 1 && (
+        <div style={{ display: 'flex', justifyContent: 'center', gap: '0.5rem', padding: '0.8rem' }}>
+          <button
+            className="btn btn-ghost"
+            onClick={() => setPage(p => Math.max(0, p - 1))}
+            disabled={page === 0}
+            style={{ padding: '0.3rem 0.8rem', fontSize: '0.75rem' }}
+          >
+            ← Prev
+          </button>
+          <span style={{ fontSize: '0.75rem', color: '#64748b', alignSelf: 'center' }}>
+            {page + 1} / {totalPages}
+          </span>
+          <button
+            className="btn btn-ghost"
+            onClick={() => setPage(p => Math.min(totalPages - 1, p + 1))}
+            disabled={page >= totalPages - 1}
+            style={{ padding: '0.3rem 0.8rem', fontSize: '0.75rem' }}
+          >
+            Next →
+          </button>
+        </div>
+      )}
+    </div>
   );
 }
 

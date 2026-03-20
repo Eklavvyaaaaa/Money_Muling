@@ -162,6 +162,9 @@ class FraudGraph {
       // ---- Fan-out: this node → many unique receivers within 72 h ----
       const outgoing = this.adjList.get(nodeId) || [];
       if (outgoing.length >= THRESHOLD) {
+        // Skip payroll-like accounts before scoring fan-out
+        if (this._detectPayrollPattern(nodeId)) continue;
+
         const sorted = [...outgoing].sort((a, b) => a.ts - b.ts);
         let left = 0;
         for (let right = 0; right < sorted.length; right++) {
@@ -181,7 +184,7 @@ class FraudGraph {
             nodeData.score += 30;
             for (const r of uniqueReceivers) {
               const rn = this.nodeMap.get(r);
-              if (rn && !this._isMerchantLike(r)) {
+              if (rn && !this._isMerchantLike(r) && !this._detectPayrollPattern(r)) {
                 rn.patterns.add('fan_out_target');
                 rn.ring_ids.add(ringId);
                 rn.score += 15;
@@ -221,8 +224,8 @@ class FraudGraph {
           const nextData = this.nodeMap.get(next);
           const newPath = [...path, next];
 
-          // Record chains of length ≥ 3 where intermediates have low activity
-          if (newPath.length >= 3) {
+          // Record chains of ≥ 3 hops (4+ nodes) where intermediates have low activity
+          if (newPath.length >= 4) {
             const intermediates = newPath.slice(1, -1);
             const allShell = intermediates.every(m => {
               const d = this.nodeMap.get(m);

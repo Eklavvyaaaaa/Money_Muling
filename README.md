@@ -22,7 +22,7 @@ A full-stack web application that detects money muling networks by modelling fin
 
 ## System Architecture
 
-```
+```text
 ┌───────────────────────────────────────────────────┐
 │                   React Client                    │
 │  ┌─────────┐  ┌───────────┐  ┌───────────────┐   │
@@ -138,7 +138,7 @@ Each account receives a cumulative score based on detected patterns:
 cd server
 npm install
 npm start
-# Server runs on http://localhost:5000
+# Server runs on http://localhost:5001
 ```
 
 ### Frontend
@@ -151,7 +151,7 @@ npm run dev
 
 ### Environment Variables (Optional)
 Create a `.env` in `/client`:
-```
+```dotenv
 VITE_API_URL=https://your-render-backend.onrender.com
 ```
 
