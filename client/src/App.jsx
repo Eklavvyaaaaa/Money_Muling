@@ -5,6 +5,8 @@ import GraphView from './components/GraphView';
 import ResultsTable from './components/ResultsTable';
 import './index.css';
 
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5001';
+
 function App() {
   const [results, setResults] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -17,27 +19,37 @@ function App() {
     formData.append('file', file);
 
     try {
-      const response = await axios.post('http://localhost:5000/upload', formData);
+      const response = await axios.post(`${API_URL}/upload`, formData);
       setResults(response.data);
     } catch (err) {
-      setError('Failed to process file. Ensure format is correct.');
+      const msg = err.response?.data?.error || 'Failed to process file.';
+      const details = err.response?.data?.details;
+      setError(details ? `${msg}\n${details.join('\n')}` : msg);
     } finally {
       setLoading(false);
     }
   };
 
   const handleDownload = () => {
-    window.open('http://localhost:5000/download', '_blank');
+    window.open(`${API_URL}/download`, '_blank');
   };
 
   return (
     <div className="app-container">
       <header className="header">
-        <h1>Antigravity: <span>Financial Forensics Engine</span></h1>
+        <div className="header-left">
+          <div className="header-logo">🔍</div>
+          <h1>Antigravity <span>Financial Forensics Engine</span></h1>
+        </div>
         {results && (
-          <button className="download-btn" onClick={handleDownload}>
-            Download JSON Report
-          </button>
+          <div className="header-actions">
+            <button className="btn btn-outline" onClick={() => setResults(null)}>
+              ↩ New Analysis
+            </button>
+            <button className="btn btn-primary" onClick={handleDownload}>
+              ⬇ Download JSON
+            </button>
+          </div>
         )}
       </header>
 
@@ -46,36 +58,59 @@ function App() {
       ) : (
         <main className="dashboard">
           <section className="stats-row">
-            <div className="stat-card">
-              <h3>Total Accounts</h3>
-              <p>{results.summary.total_accounts_analyzed}</p>
+            <div className="stat-card accent">
+              <div className="stat-label">Accounts Analyzed</div>
+              <div className="stat-value">{results.summary.total_accounts_analyzed}</div>
             </div>
-            <div className="stat-card highlighted">
-              <h3>Suspicious</h3>
-              <p>{results.summary.suspicious_accounts_flagged}</p>
+            <div className="stat-card warning">
+              <div className="stat-label">Suspicious Flagged</div>
+              <div className="stat-value">{results.summary.suspicious_accounts_flagged}</div>
             </div>
-            <div className="stat-card risk">
-              <h3>Fraud Rings</h3>
-              <p>{results.summary.fraud_rings_detected}</p>
+            <div className="stat-card danger">
+              <div className="stat-label">Fraud Rings</div>
+              <div className="stat-value">{results.summary.fraud_rings_detected}</div>
             </div>
-            <div className="stat-card">
-              <h3>Time</h3>
-              <p>{results.summary.processing_time_seconds}s</p>
+            <div className="stat-card success">
+              <div className="stat-label">Processing Time</div>
+              <div className="stat-value">{results.summary.processing_time_seconds}s</div>
             </div>
           </section>
 
           <div className="content-grid">
-            <div className="graph-container">
-              <GraphView data={results.graph_data} />
+            <div className="graph-card">
+              <div className="card-header">
+                <h3>🌐 Network Graph</h3>
+                <div className="legend">
+                  <div className="legend-item">
+                    <span className="legend-dot" style={{ background: '#6366f1' }}></span> Normal
+                  </div>
+                  <div className="legend-item">
+                    <span className="legend-dot" style={{ background: '#ef4444' }}></span> Suspicious
+                  </div>
+                  <div className="legend-item">
+                    <span className="legend-dot" style={{ background: '#f59e0b' }}></span> Ring Member
+                  </div>
+                </div>
+              </div>
+              <div className="graph-body">
+                <GraphView data={results.graph_data} />
+              </div>
             </div>
-            <div className="table-container">
-              <ResultsTable results={results} />
+            <div className="table-card">
+              <div className="card-header">
+                <h3>📊 Analysis Results</h3>
+              </div>
+              <div className="table-body">
+                <ResultsTable results={results} />
+              </div>
             </div>
           </div>
-          
-          <button className="reset-btn" onClick={() => setResults(null)}>
-            Upload New File
-          </button>
+
+          <div className="footer-actions">
+            <button className="btn btn-primary" onClick={handleDownload}>
+              ⬇ Download Full JSON Report
+            </button>
+          </div>
         </main>
       )}
     </div>
