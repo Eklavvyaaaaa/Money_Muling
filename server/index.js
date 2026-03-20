@@ -14,10 +14,11 @@ app.use(express.json());
 
 let analysisResults = null;
 let currentGraph = null;
-const globalStatuses = new Map(); // Store analyst metadata across graph lifecycle
+const globalStatuses = new Map();
 
 const REQUIRED_COLUMNS = ['transaction_id', 'sender_id', 'receiver_id', 'amount', 'timestamp'];
 
+// ============ UPLOAD ============
 app.post('/upload', upload.single('file'), (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded.' });
 
@@ -47,43 +48,47 @@ app.post('/upload', upload.single('file'), (req, res) => {
       if (parseErrors.length > 0) return res.status(400).json({ error: 'CSV error', details: parseErrors.slice(0, 5) });
       if (rowCount === 0) return res.status(400).json({ error: 'CSV empty.' });
 
-      // Run DSA Suite
-      const sccRings = graph.detectSCCs();
-      const smurfRings = graph.detectSmurfing();
-      const chainRings = graph.detectLayeredChains();
-      graph.calculateFinalScores(globalStatuses);
+      try {
+        const sccRings = graph.detectSCCs();
+        const smurfRings = graph.detectSmurfing();
+        const chainRings = graph.detectLayeredChains();
+        graph.calculateFinalScores(globalStatuses);
 
-      const clusters = graph.detectClusters();
-      const mstTxIds = graph.computeMST();
+        const clusters = graph.detectClusters();
+        const mstTxIds = graph.computeMST();
 
-      const processingTimeMs = Date.now() - startTime;
-      const allRings = [...sccRings, ...smurfRings, ...chainRings];
-      const fraud_rings = allRings.map(r => ({
-        ...r,
-        risk_score: parseFloat(Math.max(...r.member_accounts.map(m => graph.nodeMap.get(m).score)).toFixed(1))
-      })).filter(r => r.risk_score > 0);
-      fraud_rings.sort((a, b) => b.risk_score - a.risk_score);
+        const processingTimeMs = Date.now() - startTime;
+        const allRings = [...sccRings, ...smurfRings, ...chainRings];
+        const fraud_rings = allRings.map(r => ({
+          ...r,
+          risk_score: parseFloat(Math.max(...r.member_accounts.map(m => graph.nodeMap.get(m).score)).toFixed(1))
+        })).filter(r => r.risk_score > 0);
+        fraud_rings.sort((a, b) => b.risk_score - a.risk_score);
 
-      analysisResults = graph.getResults(processingTimeMs, {
-        fraud_rings,
-        fraud_clusters: clusters,
-        mstTxIds, // Pass the Set directly to tag links
-        mst_skeleton_count: mstTxIds.size,
-        summary: {
-          total_accounts_analyzed: graph.nodeMap.size,
-          suspicious_accounts_flagged: graph.nodeMap.size - Array.from(graph.nodeMap.values()).filter(n => n.score === 0).length,
-          fraud_rings_detected: fraud_rings.length,
-          organized_clusters: clusters.length,
-          processing_time_seconds: parseFloat((processingTimeMs / 1000).toFixed(1))
-        }
-      }, globalStatuses);
+        analysisResults = graph.getResults(processingTimeMs, {
+          fraud_rings,
+          fraud_clusters: clusters,
+          mstTxIds,
+          mst_skeleton_count: mstTxIds.size,
+          summary: {
+            total_accounts_analyzed: graph.nodeMap.size,
+            suspicious_accounts_flagged: graph.nodeMap.size - Array.from(graph.nodeMap.values()).filter(n => n.score === 0).length,
+            fraud_rings_detected: fraud_rings.length,
+            organized_clusters: clusters.length,
+            processing_time_seconds: parseFloat((processingTimeMs / 1000).toFixed(1))
+          }
+        }, globalStatuses);
 
-      currentGraph = graph;
-
-      res.json(analysisResults);
+        currentGraph = graph;
+        res.json(analysisResults);
+      } catch (err) {
+        console.error('PROCESSING ERROR:', err);
+        res.status(500).json({ error: 'Processing failed: ' + err.message });
+      }
     });
 });
 
+// ============ ANALYST STATUS ============
 app.post('/account/:id/status', (req, res) => {
   const accountId = req.params.id;
   const { status, notes } = req.body;
@@ -94,7 +99,6 @@ app.post('/account/:id/status', (req, res) => {
   if (currentGraph && analysisResults) {
     currentGraph.calculateFinalScores(globalStatuses);
 
-    // Regenerate nodes array inside analysisResults gracefully
     analysisResults.graph_data.nodes = Array.from(currentGraph.nodeMap.values()).map(n => ({
       id: n.id, score: n.score,
       ring_id: n.ring_ids.size > 0 ? Array.from(n.ring_ids)[0] : null,
@@ -105,7 +109,6 @@ app.post('/account/:id/status', (req, res) => {
       analyst_status: (globalStatuses.get(n.id) || {}).status || 'Unreviewed'
     }));
 
-    // Regenerate suspicious tagged list
     const suspicious = [];
     for (const [vid, data] of currentGraph.nodeMap) {
       if (data.score > 0 || (globalStatuses.get(vid) && globalStatuses.get(vid).status === 'Confirmed Fraud')) {
@@ -127,17 +130,19 @@ app.post('/account/:id/status', (req, res) => {
   res.json({ success: true, accountId, status, notes, updatedGraphData });
 });
 
+// ============ DEEP DIVE ============
 app.get('/account/:id/deepdive', (req, res) => {
-  if (!currentGraph) return res.status(404).json({ error: 'No graph available.' });
+  if (!currentGraph) return res.status(404).json({ error: 'No graph available. Please upload a CSV first.' });
   const id = req.params.id;
   const node = currentGraph.nodeMap.get(id);
-  if (!node) return res.status(404).json({ error: 'Account not found.' });
+  if (!node) return res.status(404).json({ error: 'Account not found: ' + id });
 
   const analystInfo = globalStatuses.get(id) || { status: 'Unreviewed', notes: '' };
   const incoming = currentGraph.reverseAdj.get(id) || [];
   const outgoing = currentGraph.adjList.get(id) || [];
 
-  let totalInflow = 0; let totalOutflow = 0;
+  let totalInflow = 0;
+  let totalOutflow = 0;
   const txHistory = [];
   const counterparties = new Map();
   const peakHours = new Array(24).fill(0);
@@ -178,6 +183,7 @@ app.get('/account/:id/deepdive', (req, res) => {
   });
 });
 
+// ============ TIMELINE / REPLAY ============
 app.get('/timeline', (req, res) => {
   if (!currentGraph) return res.status(404).json({ error: 'No graph available.' });
   const timestamps = Array.from(new Set(currentGraph.edges.map(e => new Date(e.timestamp).getTime()))).sort((a, b) => a - b);
@@ -192,6 +198,7 @@ app.get('/replay', (req, res) => {
   res.json(state);
 });
 
+// ============ EXPLANATION (legacy) ============
 app.get('/account/:id/explanation', (req, res) => {
   if (!currentGraph) return res.status(404).json({ error: 'No graph available.' });
   const node = currentGraph.nodeMap.get(req.params.id);
@@ -204,6 +211,7 @@ app.get('/account/:id/explanation', (req, res) => {
   });
 });
 
+// ============ DOWNLOAD / PING ============
 app.get('/download', (req, res) => {
   if (!analysisResults) return res.status(404).json({ error: 'No results.' });
   const report = { ...analysisResults };
@@ -211,6 +219,9 @@ app.get('/download', (req, res) => {
   res.send(JSON.stringify(report, null, 2));
 });
 
+app.get('/ping', (req, res) => {
+  res.json({ status: 'ok', version: 'v3-deepdive' });
+});
+
 const PORT = 5001;
-app.get('/ping', (req, res) => res.json({ status: 'ok', version: 'v2-deepdive', routes: app._router.stack.filter(r => r.route).map(r => `${Object.keys(r.route.methods)[0].toUpperCase()} ${r.route.path}`) }));
-app.listen(PORT, () => console.log(`🔍 Antigravity DSA Server v2: http://localhost:${PORT}`));
+app.listen(PORT, () => console.log('ANTIGRAVITY SERVER v3 RUNNING ON PORT ' + PORT));
