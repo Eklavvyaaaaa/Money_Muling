@@ -38,14 +38,15 @@ class FraudGraph {
       if (!this.nodeMap.has(id)) {
         this.nodeMap.set(id, {
           id, score: 0, patterns: new Set(), ring_ids: new Set(),
-          inDegree: 0, outDegree: 0, txCount: 0, txTimestamps: []
+          inDegree: 0, outDegree: 0, txCount: 0, txTimestamps: [],
+          distanceFromRiskSource: null, associationRisk: 0, explanations: []
         });
       }
     }
     const sn = this.nodeMap.get(sender_id);
     const rn = this.nodeMap.get(receiver_id);
     sn.outDegree++; sn.txCount++; sn.txTimestamps.push(ts);
-    rn.inDegree++;  rn.txCount++; rn.txTimestamps.push(ts);
+    rn.inDegree++; rn.txCount++; rn.txTimestamps.push(ts);
 
     this.edges.push({ sender_id, receiver_id, amount, timestamp, transaction_id });
   }
@@ -184,7 +185,7 @@ class FraudGraph {
   computeMST() {
     // We compute a MAXIMUM Spanning Forest to show the most significant backbone
     const sortedEdges = [...this.edges].sort((a, b) => b.amount - a.amount);
-    
+
     const parent = new Map();
     const find = (i) => {
       if (parent.get(i) === i) return i;
@@ -217,7 +218,7 @@ class FraudGraph {
   // ---------------------------------------------------------------------------
   // EXISTING DOMAIN ALGORITHMS (Keep for complete project)
   // ---------------------------------------------------------------------------
-  
+
   detectSmurfing() {
     const WINDOW_MS = 72 * 60 * 60 * 1000;
     const THRESHOLD = 10;
@@ -324,25 +325,122 @@ class FraudGraph {
     return uniqueAmounts.size <= 2 && o.length >= 10;
   }
 
-  calculateFinalScores() {
+  propagateRiskBFS() {
+    const queue = [];
+    const distances = new Map();
+    const contributions = new Map();
+
     for (const [nodeId, data] of this.nodeMap) {
-      if (this._isMerchantLike(nodeId) || this._detectPayrollPattern(nodeId)) {
-        data.score = 0; data.patterns.clear(); data.ring_ids.clear();
+      distances.set(nodeId, Infinity);
+      data.associationRisk = 0;
+      data.distanceFromRiskSource = null;
+      if (data.score > 0) {
+        queue.push(nodeId);
+        distances.set(nodeId, 0);
+        data.distanceFromRiskSource = 0;
+        contributions.set(nodeId, new Set([nodeId]));
+      } else {
+        contributions.set(nodeId, new Set());
       }
-      data.score = Math.min(100, data.score);
+    }
+
+    let head = 0;
+    while (head < queue.length) {
+      const u = queue[head++];
+      const uDist = distances.get(u);
+
+      const neighbors = new Set();
+      for (const e of (this.adjList.get(u) || [])) neighbors.add(e.target);
+      for (const e of (this.reverseAdj.get(u) || [])) neighbors.add(e.source);
+
+      const uSources = contributions.get(u);
+
+      for (const v of neighbors) {
+        const vDist = distances.get(v);
+        // We only propagate efficiently downwards (BFS levels)
+        if (uDist + 1 <= vDist) {
+          if (vDist === Infinity) {
+            distances.set(v, uDist + 1);
+            this.nodeMap.get(v).distanceFromRiskSource = uDist + 1;
+            queue.push(v);
+          }
+          const vSources = contributions.get(v);
+          for (const s of uSources) {
+            if (!vSources.has(s)) {
+              vSources.add(s);
+              const sourceScore = this.nodeMap.get(s).score;
+              this.nodeMap.get(v).associationRisk += (sourceScore / Math.pow(2, uDist + 1));
+            }
+          }
+        }
+      }
     }
   }
 
-  getResults(processingTimeMs, extra) {
+  generateExplanation(data, statusObj) {
+    const explanations = [];
+    if (statusObj && statusObj.status && statusObj.status !== 'Unreviewed') {
+      explanations.push(`Analyst Status: ${statusObj.status}`);
+    }
+    if (data.ring_ids.size > 0) explanations.push("Part of a circular transaction loop (SCC)");
+    if (data.patterns.has('fan_in') || data.patterns.has('fan_in_source')) explanations.push("Receives funds from multiple accounts (high fan-in/smurfing)");
+    if (data.patterns.has('fan_out') || data.patterns.has('fan_out_target')) explanations.push("Sends funds to multiple accounts (high fan-out/smurfing)");
+    if (data.patterns.has('layered_chain')) explanations.push("Involved in a layered transaction chain");
+    if (data.distanceFromRiskSource !== null && data.distanceFromRiskSource > 0) explanations.push(`Connected to a high-risk account within ${data.distanceFromRiskSource} hops (Guilt by association)`);
+    if (data.txCount >= 15) explanations.push("Shows unusually high transaction frequency");
+    if (explanations.length === 0 && data.score > 0) explanations.push("Flagged by baseline heuristics");
+    if (explanations.length === 0 && data.score === 0) explanations.push("Normal account behavior");
+    return explanations;
+  }
+
+  calculateFinalScores(globalStatuses = new Map()) {
+    // Pass 1: Inject analyst statuses into base scores before BFS
+    for (const [nodeId, data] of this.nodeMap) {
+      const statusObj = globalStatuses.get(nodeId);
+      if (statusObj) {
+        if (statusObj.status === 'Confirmed Fraud') data.score = 100;
+        else if (statusObj.status === 'Escalated') data.score = Math.max(80, data.score);
+        else if (statusObj.status === 'Cleared') data.score = 0;
+      }
+    }
+
+    // Pass 2: Propagate risk via BFS
+    this.propagateRiskBFS();
+
+    // Pass 3: Recalculate final scores
+    for (const [nodeId, data] of this.nodeMap) {
+      const statusObj = globalStatuses.get(nodeId);
+      if (statusObj && statusObj.status === 'Cleared') {
+        data.score = 0; data.associationRisk = 0;
+      } else if (statusObj && statusObj.status === 'Confirmed Fraud') {
+        data.score = 100;
+      } else if (this._isMerchantLike(nodeId) || this._detectPayrollPattern(nodeId)) {
+        data.score = 0; data.patterns.clear(); data.ring_ids.clear();
+        data.associationRisk = 0; data.distanceFromRiskSource = null;
+      } else {
+        const cycle_score = data.ring_ids.size > 0 ? 30 : 0;
+        const fan_in_score = (data.patterns.has('fan_in') || data.patterns.has('fan_in_source')) ? 20 : 0;
+        const fan_out_score = (data.patterns.has('fan_out') || data.patterns.has('fan_out_target')) ? 20 : 0;
+        const freq_score = data.txCount >= 15 ? 10 : 0;
+        data.score = cycle_score + fan_in_score + fan_out_score + data.associationRisk + freq_score;
+        if (statusObj && statusObj.status === 'Escalated') data.score = Math.max(80, data.score);
+      }
+      data.score = Math.min(100, data.score);
+      data.explanations = this.generateExplanation(data, statusObj);
+    }
+  }
+
+  getResults(processingTimeMs, extra, globalStatuses = new Map()) {
     const mstTxIds = extra.mstTxIds || new Set();
     const suspicious_accounts = [];
     for (const [id, data] of this.nodeMap) {
-      if (data.score > 0) {
+      if (data.score > 0 || (globalStatuses.has(id) && globalStatuses.get(id).status === 'Confirmed Fraud')) {
         suspicious_accounts.push({
           account_id: id,
           suspicion_score: parseFloat(data.score.toFixed(1)),
           detected_patterns: Array.from(data.patterns),
-          ring_id: data.ring_ids.size > 0 ? Array.from(data.ring_ids)[0] : null
+          ring_id: data.ring_ids.size > 0 ? Array.from(data.ring_ids)[0] : null,
+          analyst_status: (globalStatuses.get(id) || {}).status || 'Unreviewed'
         });
       }
     }
@@ -355,7 +453,11 @@ class FraudGraph {
         nodes: Array.from(this.nodeMap.values()).map(n => ({
           id: n.id, score: n.score,
           ring_id: n.ring_ids.size > 0 ? Array.from(n.ring_ids)[0] : null,
-          patterns: Array.from(n.patterns)
+          patterns: Array.from(n.patterns),
+          distanceFromRiskSource: n.distanceFromRiskSource,
+          associationRisk: n.associationRisk,
+          explanations: n.explanations,
+          analyst_status: (globalStatuses.get(n.id) || {}).status || 'Unreviewed'
         })),
         links: this.edges.map(e => ({
           source: e.sender_id, target: e.receiver_id,
@@ -363,6 +465,34 @@ class FraudGraph {
           isMST: mstTxIds.has(e.transaction_id)
         }))
       }
+    };
+  }
+
+  getGraphStateAtTime(timestamp) {
+    const ts = Number(timestamp);
+    const validEdges = this.edges.filter(e => new Date(e.timestamp).getTime() <= ts);
+    const validNodeIds = new Set();
+    validEdges.forEach(e => {
+      validNodeIds.add(e.sender_id);
+      validNodeIds.add(e.receiver_id);
+    });
+
+    return {
+      nodes: Array.from(this.nodeMap.values())
+        .filter(n => validNodeIds.has(n.id))
+        .map(n => ({
+          id: n.id, score: n.score,
+          ring_id: n.ring_ids.size > 0 ? Array.from(n.ring_ids)[0] : null,
+          patterns: Array.from(n.patterns),
+          distanceFromRiskSource: n.distanceFromRiskSource,
+          associationRisk: n.associationRisk,
+          explanations: n.explanations,
+          analyst_status: 'Unreviewed'
+        })),
+      links: validEdges.map(e => ({
+        source: e.sender_id, target: e.receiver_id,
+        amount: e.amount, timestamp: e.timestamp, transaction_id: e.transaction_id
+      }))
     };
   }
 

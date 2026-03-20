@@ -5,6 +5,10 @@ import GraphView from './components/GraphView';
 import ResultsTable from './components/ResultsTable';
 import PatternInsights from './components/PatternInsights';
 import RingDetail from './components/RingDetail';
+import ExplanationPanel from './components/ExplanationPanel';
+import DeepDivePanel from './components/DeepDivePanel';
+import NetworkReplay from './components/NetworkReplay';
+import GraphFilterBar from './components/GraphFilterBar';
 import './index.css';
 
 const API_URL = (() => {
@@ -18,6 +22,39 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [showMST, setShowMST] = useState(false);
+  const [selectedNodeId, setSelectedNodeId] = useState(null);
+  const [graphData, setGraphData] = useState(null);
+  const [filterStatus, setFilterStatus] = useState('All');
+
+  const filteredGraphData = React.useMemo(() => {
+    if (!graphData) return null;
+    if (filterStatus === 'All') return graphData;
+
+    const validNodes = new Set();
+    graphData.nodes.forEach(n => {
+      if (filterStatus === 'High Risk Only' && n.score > 50) validNodes.add(n.id);
+      else if (n.analyst_status === filterStatus) validNodes.add(n.id);
+    });
+
+    const links = graphData.links.filter(l => {
+      const sourceId = typeof l.source === 'object' ? l.source.id : l.source;
+      const targetId = typeof l.target === 'object' ? l.target.id : l.target;
+      return validNodes.has(sourceId) || validNodes.has(targetId);
+    });
+
+    const finalNodeIds = new Set();
+    links.forEach(l => {
+      const sourceId = typeof l.source === 'object' ? l.source.id : l.source;
+      const targetId = typeof l.target === 'object' ? l.target.id : l.target;
+      finalNodeIds.add(sourceId);
+      finalNodeIds.add(targetId);
+    });
+
+    validNodes.forEach(id => finalNodeIds.add(id));
+    const nodes = graphData.nodes.filter(n => finalNodeIds.has(n.id));
+
+    return { nodes, links };
+  }, [graphData, filterStatus]);
 
   const handleUpload = async (file) => {
     if (!API_URL) { setError('VITE_API_URL not set.'); return; }
@@ -28,6 +65,7 @@ function App() {
     try {
       const res = await axios.post(`${API_URL}/upload`, formData);
       setResults(res.data);
+      setGraphData(res.data.graph_data);
     } catch (err) {
       setError(err.response?.data?.error || 'Failed to process file.');
     } finally {
@@ -36,7 +74,7 @@ function App() {
   };
 
   const handleDownload = () => window.open(`${API_URL}/download`, '_blank');
-  const handleReset = () => { setResults(null); setError(null); setShowMST(false); };
+  const handleReset = () => { setResults(null); setError(null); setShowMST(false); setGraphData(null); setSelectedNodeId(null); setFilterStatus('All'); };
 
   return (
     <div className="app">
@@ -78,12 +116,14 @@ function App() {
 
           <PatternInsights results={results} />
 
+          <NetworkReplay onGraphUpdate={(state) => setGraphData(state)} />
+
           <section className="main-grid">
             <div className="card">
               <div className="card-header">
                 <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
                   <h3>🌐 Transaction Network</h3>
-                  <button 
+                  <button
                     className={`btn ${showMST ? 'btn-primary' : 'btn-ghost'}`}
                     onClick={() => setShowMST(!showMST)}
                     style={{ padding: '0.3rem 0.6rem', fontSize: '0.7rem' }}
@@ -97,8 +137,25 @@ function App() {
                   <div className="legend-item"><span className="legend-dot" style={{ background: '#f59e0b' }}></span> SCC Member</div>
                 </div>
               </div>
-              <div className="graph-body">
-                <GraphView data={results.graph_data} showMST={showMST} />
+              <div className="graph-body" style={{ position: 'relative', minHeight: '600px' }}>
+                <GraphFilterBar filterStatus={filterStatus} setFilterStatus={setFilterStatus} />
+                {selectedNodeId && (
+                  <DeepDivePanel
+                    nodeId={selectedNodeId}
+                    API_URL={API_URL}
+                    onClose={() => setSelectedNodeId(null)}
+                    onStatusUpdate={(updatedGraphData) => {
+                      if (updatedGraphData) setGraphData(updatedGraphData);
+                    }}
+                  />
+                )}
+                {filteredGraphData && (
+                  <GraphView
+                    data={filteredGraphData}
+                    showMST={showMST}
+                    onNodeClick={(id) => setSelectedNodeId(id)}
+                  />
+                )}
               </div>
             </div>
             <div className="card sidebar-panel">
@@ -108,7 +165,7 @@ function App() {
               </div>
               <div className="panel-body">
                 <ResultsTable accounts={results.suspicious_accounts} />
-                
+
                 {results.fraud_clusters && results.fraud_clusters.length > 0 && (
                   <div className="clusters-section" style={{ padding: '1rem' }}>
                     <h4 style={{ fontSize: '0.75rem', color: '#64748b', textTransform: 'uppercase', marginBottom: '0.8rem' }}>
